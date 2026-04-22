@@ -2,16 +2,28 @@
 //  PhotoFixer.swift
 //  Heifixer
 //
+//  Consumes `Candidate` rows in `.pending` state and:
+//    1. streams the original HEIF bytes to a local temp file,
+//    2. verifies the EXIF Make field starts with "SONY" (the only
+//       signal we can read; Sony A6700 omits IFD0 Orientation and
+//       stores rotation in the HEIF `irot` box + MakerNote),
+//    3. creates a new asset with filename "<base>.HEIC" using those
+//       bytes verbatim,
+//    4. (optional) queues the original for batched deletion so the
+//       user sees a single system confirmation prompt for the batch.
+//
 
 import Foundation
+import ImageIO
 import Photos
-import PhotosUI
+import SwiftData
 import SwiftUI
 
 enum FixMode: String, CaseIterable, Identifiable {
     /// Create a new HEIC asset; leave the original HEIF untouched.
     case keepOriginal
-    /// Create a new HEIC asset and delete the original HEIF (batched at the end of processing).
+    /// Create a new HEIC asset and delete the original HEIF (batched at the
+    /// end of processing so only one system prompt appears).
     case replaceOriginal
 
     var id: String { rawValue }
@@ -34,16 +46,27 @@ enum FixMode: String, CaseIterable, Identifiable {
 }
 
 @Observable
+@MainActor
 final class PhotoFixer {
-    var jobs: [FixJob] = []
-    var isProcessing: Bool = false
+    // MARK: - Configuration
+
     var mode: FixMode = .keepOriginal
     var authorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+
+    // MARK: - Observable progress state
+
+    private(set) var isProcessing: Bool = false
+    /// Number of candidates processed in the current/most-recent run.
+    private(set) var processedCount: Int = 0
+    /// Total candidates in the current run (set at start of `processPending`).
+    private(set) var totalCount: Int = 0
+    /// Surfaced to the UI for non-fatal notices (e.g. batch delete cancelled).
     var lastError: String?
 
-    /// Replacements that have been prepared (new HEIC created) but whose originals
-    /// still need to be deleted at the end of `processAll`.
-    private var pendingReplacements: [(job: FixJob, originalAsset: PHAsset)] = []
+    /// Successful fixes whose original asset is pending batched deletion.
+    /// Keyed by original PHAsset so we can map back to the Candidate row
+    /// after the batch deletion commits.
+    private var pendingReplacements: [(candidateID: PersistentIdentifier, originalAsset: PHAsset)] = []
 
     // MARK: - Authorization
 
@@ -56,99 +79,90 @@ final class PhotoFixer {
         authorizationStatus == .authorized || authorizationStatus == .limited
     }
 
-    // MARK: - Job queue management
+    // MARK: - Batch processing
 
-    /// Turn PhotosPicker selections into fix jobs. The picker **must** be constructed with
-    /// `photoLibrary: .shared()` so that `itemIdentifier` resolves to a `PHAsset` local
-    /// identifier; otherwise we can't reach `PHAssetResourceManager` for the original bytes.
-    func addJobs(from selections: [PhotosPickerItem]) {
-        let identifiers = selections.compactMap(\.itemIdentifier)
-        guard !identifiers.isEmpty else {
-            lastError = "未能从所选照片中获取资源标识符，请确认已授权完整照片库访问。"
+    /// Iterate every `Candidate` in `.pending` state and attempt to fix it.
+    /// Writes state transitions back into the provided `ModelContext` as
+    /// each candidate completes. Safe to call while scanning is in flight;
+    /// new candidates that appear mid-run are deferred to the next call.
+    func processPending(modelContext: ModelContext) async {
+        guard !isProcessing else { return }
+        guard hasLibraryAccess else {
+            lastError = "照片库访问未授权。"
             return
         }
-
-        let fetch = PHAsset.fetchAssets(withLocalIdentifiers: identifiers, options: nil)
-        var newJobs: [FixJob] = []
-        for index in 0..<fetch.count {
-            let asset = fetch.object(at: index)
-            if jobs.contains(where: { $0.assetLocalIdentifier == asset.localIdentifier }) {
-                continue
-            }
-            let primary = Self.primaryResource(for: asset)
-            let job = FixJob(
-                assetLocalIdentifier: asset.localIdentifier,
-                displayName: primary?.originalFilename ?? "未命名照片",
-                originalUTI: primary?.uniformTypeIdentifier,
-                pixelWidth: asset.pixelWidth,
-                pixelHeight: asset.pixelHeight,
-                creationDate: asset.creationDate
-            )
-            newJobs.append(job)
-        }
-        jobs.append(contentsOf: newJobs)
-    }
-
-    func remove(_ job: FixJob) {
-        jobs.removeAll { $0.id == job.id }
-    }
-
-    func clearCompleted() {
-        jobs.removeAll { $0.status.isTerminal }
-    }
-
-    func resetAll() {
-        jobs.removeAll()
-    }
-
-    // MARK: - Processing
-
-    func processAll() async {
-        guard !isProcessing else { return }
         isProcessing = true
         lastError = nil
         pendingReplacements.removeAll()
         defer { isProcessing = false }
 
-        // Snapshot mode for this run so mid-run toggles don't cause mixed behavior.
         let runMode = mode
+        let pendingRaw = Candidate.State.pending.rawValue
+        let descriptor = FetchDescriptor<Candidate>(
+            predicate: #Predicate<Candidate> { $0.stateRaw == pendingRaw },
+            sortBy: [SortDescriptor(\Candidate.creationDate, order: .reverse)]
+        )
 
-        let pending = jobs.filter { !$0.status.isTerminal || $0.status == .pending }
-        for job in pending {
-            await process(job, mode: runMode)
+        let candidates: [Candidate]
+        do {
+            candidates = try modelContext.fetch(descriptor)
+        } catch {
+            lastError = "读取待修复列表失败：\(error.localizedDescription)"
+            return
         }
 
-        // Batched deletion: one system prompt covers every replaced original.
+        totalCount = candidates.count
+        processedCount = 0
+
+        for candidate in candidates {
+            await process(candidate, mode: runMode, in: modelContext)
+            processedCount += 1
+        }
+
+        // Persist everything we changed per-candidate; SwiftData autosaves
+        // in many cases but an explicit save guarantees durability before
+        // we hand off to the batched-delete stage.
+        try? modelContext.save()
+
         if runMode == .replaceOriginal, !pendingReplacements.isEmpty {
-            await flushPendingDeletions()
+            await flushPendingDeletions(modelContext: modelContext)
+            try? modelContext.save()
         }
     }
 
-    func process(_ job: FixJob, mode: FixMode? = nil) async {
-        let runMode = mode ?? self.mode
-        job.status = .processing
+    // MARK: - Single-candidate flow
+
+    private func process(
+        _ candidate: Candidate,
+        mode: FixMode,
+        in context: ModelContext
+    ) async {
+        candidate.state = .processing
         do {
-            try await fix(job, mode: runMode)
+            try await fix(candidate, mode: mode, in: context)
         } catch let error as FixError {
             switch error {
-            case .notHEIF, .alreadyHEIC:
-                job.status = .skipped(reason: error.errorDescription ?? "已跳过")
+            case .alreadyHEIC, .notSony, .notHEIF:
+                candidate.state = .skipped
+                candidate.skipReason = error.errorDescription
             default:
-                job.status = .failed(message: error.errorDescription ?? "修复失败")
+                candidate.state = .failed
+                candidate.skipReason = error.errorDescription
             }
         } catch {
-            job.status = .failed(message: error.localizedDescription)
+            candidate.state = .failed
+            candidate.skipReason = error.localizedDescription
         }
     }
 
-    // MARK: - Core fix
-
-    private func fix(_ job: FixJob, mode: FixMode) async throws {
-        guard hasLibraryAccess else {
-            throw FixError.unauthorized
-        }
-        let asset = try fetchAsset(identifier: job.assetLocalIdentifier)
-        guard let resource = Self.primaryHEIFResource(for: asset) else {
+    private func fix(
+        _ candidate: Candidate,
+        mode: FixMode,
+        in context: ModelContext
+    ) async throws {
+        let asset = try fetchAsset(identifier: candidate.originalAssetID)
+        let resources = PHAssetResource.assetResources(for: asset)
+        guard let resource = Self.primaryHEIFResource(in: resources) else {
             throw FixError.notHEIF
         }
 
@@ -156,6 +170,8 @@ final class PhotoFixer {
         let baseName = (sourceName as NSString).deletingPathExtension
         let ext = (sourceName as NSString).pathExtension.lowercased()
 
+        // If the resource is already .HEIC extension we have nothing to fix
+        // (renaming to itself is a no-op); record as skipped.
         if ext == "heic" {
             throw FixError.alreadyHEIC
         }
@@ -166,29 +182,27 @@ final class PhotoFixer {
             .appendingPathExtension("heic")
 
         try await Self.writeResource(resource, to: tempURL)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
 
-        defer {
-            try? FileManager.default.removeItem(at: tempURL)
-        }
+        // EXIF verify now that bytes are on local disk. Parse only the
+        // properties dictionary (no pixel decode) so this costs microseconds.
+        try Self.verifySonyMake(at: tempURL)
 
-        // Copy metadata that determines where the new asset lands in the Photos
-        // timeline. `creationDate` controls position in the main Library tab
-        // (grouped by shot date). `isFavorite` is Apple-specific metadata not
-        // present in EXIF, so we must copy it explicitly. Location is already
-        // in the HEIF's EXIF GPS block and Photos will re-extract it on import,
-        // so we don't need to set `request.location` manually.
-        // NOTE: `PHAsset.dateAdded` is assigned by the system at insert time
-        // and is not settable via public API, so the new asset always appears
-        // newest in the "Recents" smart album.
+        // Snapshot asset metadata we want to preserve on the new asset.
+        // `creationDate` keeps the new row in the correct chronological
+        // position in the main Library tab; `isFavorite` is Photos-specific
+        // metadata not embedded in the file bytes.
         let creationDate = asset.creationDate
         let isFavorite = asset.isFavorite
-        // When replacing, mirror the original's custom-album membership onto the
-        // new asset so the user doesn't lose organization. Smart albums
-        // (Favorites, Selfies, Panoramas, ...) are owned by the system and we
-        // skip them; `canPerform(.addContent)` filters those out.
+        // Mirror custom-album membership so "replace" doesn't lose curation.
         let userAlbums: [PHAssetCollection] = (mode == .replaceOriginal)
             ? Self.userAlbumsContaining(asset)
             : []
+
+        // Box the created placeholder's local identifier so we can write
+        // `fixedAssetID` back to the Candidate after the change block
+        // settles.
+        var createdIdentifier: String?
 
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
@@ -202,6 +216,7 @@ final class PhotoFixer {
             request.isFavorite = isFavorite
 
             if let placeholder = request.placeholderForCreatedAsset {
+                createdIdentifier = placeholder.localIdentifier
                 for album in userAlbums {
                     if let albumRequest = PHAssetCollectionChangeRequest(for: album) {
                         albumRequest.addAssets([placeholder] as NSArray)
@@ -210,18 +225,24 @@ final class PhotoFixer {
             }
         }
 
-        // The new asset exists; queue the original for deletion if replacing.
-        // We defer deletion so that ONE system prompt covers the whole batch.
-        if mode == .replaceOriginal {
-            pendingReplacements.append((job, asset))
-        }
+        candidate.fixedAssetID = createdIdentifier
+        candidate.fixedAt = .now
+        candidate.state = .fixed
+        candidate.skipReason = nil
 
-        job.status = .succeeded(wasReplaced: false)
+        if mode == .replaceOriginal {
+            pendingReplacements.append((candidate.persistentModelID, asset))
+        }
     }
 
     // MARK: - Batched deletion
 
-    private func flushPendingDeletions() async {
+    /// Single `performChanges` block that asks the system to delete every
+    /// original we replaced in this run. iOS surfaces a single confirmation
+    /// prompt ("Delete N photos?") regardless of batch size — there is no
+    /// documented hard upper bound on the number of assets you can pass to
+    /// `deleteAssets(_:)`.
+    private func flushPendingDeletions(modelContext: ModelContext) async {
         let targets = pendingReplacements
         pendingReplacements.removeAll()
         let assets = targets.map(\.originalAsset)
@@ -230,15 +251,17 @@ final class PhotoFixer {
             try await PHPhotoLibrary.shared().performChanges {
                 PHAssetChangeRequest.deleteAssets(assets as NSArray)
             }
-            for t in targets {
-                if case .succeeded = t.job.status {
-                    t.job.status = .succeeded(wasReplaced: true)
+            let now = Date()
+            for entry in targets {
+                if let candidate = modelContext.model(for: entry.candidateID) as? Candidate {
+                    candidate.state = .originalDeleted
+                    candidate.originalDeletedAt = now
                 }
             }
         } catch {
-            // Most common case: user tapped "取消" on the system delete prompt.
-            // New HEICs remain; originals also remain. The jobs are already
-            // marked `.succeeded(wasReplaced: false)` from the create phase.
+            // Common case: user tapped "Cancel" on the system prompt. The
+            // new HEICs are preserved; the originals stay. Candidates stay
+            // in `.fixed` so they still show up in records.
             lastError = "原图删除已取消或失败：修复后的 HEIC 已保留，原 HEIF 仍在照片库中。（\(error.localizedDescription)）"
         }
     }
@@ -253,26 +276,14 @@ final class PhotoFixer {
         return asset
     }
 
-    nonisolated private static func primaryResource(for asset: PHAsset) -> PHAssetResource? {
-        let resources = PHAssetResource.assetResources(for: asset)
-        return resources.first(where: { $0.type == .photo })
-            ?? resources.first(where: { $0.type == .fullSizePhoto })
-            ?? resources.first
-    }
-
-    nonisolated private static func primaryHEIFResource(for asset: PHAsset) -> PHAssetResource? {
-        let resources = PHAssetResource.assetResources(for: asset)
+    nonisolated private static func primaryHEIFResource(in resources: [PHAssetResource]) -> PHAssetResource? {
         let ordered = resources.sorted { typePriority($0.type) < typePriority($1.type) }
-        return ordered.first { resource in
-            isHEIF(resource)
-        }
+        return ordered.first { isHEIF($0) }
     }
 
     nonisolated private static func isHEIF(_ resource: PHAssetResource) -> Bool {
         let uti = resource.uniformTypeIdentifier.lowercased()
         let ext = (resource.originalFilename as NSString).pathExtension.lowercased()
-        // HEIC container identifiers: public.heif, public.heif-standard, public.heic
-        // Sony A6700 HEIF files are UTI public.heif with extension HEIF.
         return uti.contains("heif") || ext == "heif" || ext == "hif"
     }
 
@@ -301,6 +312,22 @@ final class PhotoFixer {
         return albums
     }
 
+    /// Read just the TIFF Make field from the local file; throw if it does
+    /// not start with "SONY". We deliberately do NOT check orientation:
+    /// Sony A6700 stores rotation in the HEIF container's `irot` transform
+    /// property and in the Sony MakerNote, not in IFD0 EXIF Orientation,
+    /// so `kCGImagePropertyOrientation` is meaningless for our use case.
+    nonisolated private static func verifySonyMake(at url: URL) throws {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        else {
+            throw FixError.cannotReadMetadata
+        }
+        let tiff = props[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+        let make = (tiff[kCGImagePropertyTIFFMake] as? String ?? "").uppercased()
+        guard make.hasPrefix("SONY") else { throw FixError.notSony }
+    }
+
     nonisolated private static func writeResource(_ resource: PHAssetResource, to url: URL) async throws {
         let options = PHAssetResourceRequestOptions()
         options.isNetworkAccessAllowed = true
@@ -325,13 +352,17 @@ enum FixError: LocalizedError {
     case alreadyHEIC
     case assetNotFound
     case unauthorized
+    case notSony
+    case cannotReadMetadata
 
     var errorDescription: String? {
         switch self {
-        case .notHEIF: "该照片不是 HEIF 格式，已跳过。"
+        case .notHEIF: "该照片没有 HEIF 资源，已跳过。"
         case .alreadyHEIC: "该照片已经是 HEIC 格式，无需修复。"
-        case .assetNotFound: "无法定位到所选照片，请确认授权完整照片库访问。"
+        case .assetNotFound: "无法定位到原照片，可能已被删除。"
         case .unauthorized: "照片库访问未授权。"
+        case .notSony: "EXIF Make 不是 Sony，已跳过。"
+        case .cannotReadMetadata: "无法读取照片元数据。"
         }
     }
 }

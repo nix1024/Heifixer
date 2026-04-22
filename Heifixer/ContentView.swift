@@ -2,17 +2,25 @@
 //  ContentView.swift
 //  Heifixer
 //
-//  Created by 王昕 on 2026/4/20.
-//
 
 import Photos
-import PhotosUI
+import SwiftData
 import SwiftUI
 
 struct ContentView: View {
     @Environment(PhotoFixer.self) private var fixer
-    @State private var selection: [PhotosPickerItem] = []
+    @Environment(PhotoLibraryScanner.self) private var scanner
+    @Environment(\.modelContext) private var modelContext
+
+    // The `stateRaw` predicate matches Candidate.State.pending.rawValue.
+    @Query(
+        filter: #Predicate<Candidate> { $0.stateRaw == "pending" },
+        sort: [SortDescriptor(\Candidate.creationDate, order: .reverse)]
+    )
+    private var pendingCandidates: [Candidate]
+
     @State private var showDeleteErrorAlert = false
+    @State private var showResetConfirm = false
 
     var body: some View {
         @Bindable var fixer = fixer
@@ -26,12 +34,6 @@ struct ContentView: View {
             }
             .navigationTitle("Heifixer")
             .toolbar { toolbarContent }
-            .onChange(of: selection) {
-                guard !selection.isEmpty else { return }
-                let picked = selection
-                selection = []
-                fixer.addJobs(from: picked)
-            }
             .onChange(of: fixer.lastError) { _, newValue in
                 showDeleteErrorAlert = newValue != nil
             }
@@ -40,154 +42,223 @@ struct ContentView: View {
             } message: {
                 Text(fixer.lastError ?? "")
             }
-        }
-        .task {
-            if fixer.authorizationStatus == .notDetermined {
-                await fixer.requestAuthorization()
+#if DEBUG
+            .alert("重置整个 App？", isPresented: $showResetConfirm) {
+                Button("取消", role: .cancel) {}
+                Button("重置", role: .destructive) {
+                    performReset()
+                }
+            } message: {
+                Text("将删除本 App 的全部扫描与修复记录，照片库中的照片不会受影响。下次启动会重新做一次全量扫描。")
             }
+#endif
         }
     }
+
+#if DEBUG
+    private func performReset() {
+        scanner.resetAll(modelContext: modelContext)
+        Task { await scanner.scan(modelContext: modelContext) }
+    }
+#endif
 
     @ViewBuilder
     private var mainContent: some View {
-        if fixer.jobs.isEmpty {
-            EmptyStateView()
-        } else {
-            jobList
-        }
-    }
-
-    private var jobList: some View {
-        @Bindable var fixer = fixer
-        return List {
-            Section {
-                Picker("修复模式", selection: $fixer.mode) {
-                    ForEach(FixMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .disabled(fixer.isProcessing)
-                Text(fixer.mode.explanation)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            } header: {
-                Text("修复模式")
-            }
-
-            Section {
-                ForEach(fixer.jobs) { job in
-                    FixJobRow(job: job)
-                        .swipeActions(edge: .trailing) {
-                            Button(role: .destructive) {
-                                fixer.remove(job)
-                            } label: {
-                                Label("移除", systemImage: "trash")
-                            }
-                        }
-                }
-            } header: {
-                Text("待修复照片 (\(fixer.jobs.count))")
-            } footer: {
-                summaryFooter
-            }
+        List {
+            scanSection
+            pendingSection
+            modeSection
+            recordsSection
         }
         .safeAreaInset(edge: .bottom) {
             fixButton
         }
     }
 
-    private var summaryFooter: some View {
-        let succeeded = fixer.jobs.filter {
-            if case .succeeded = $0.status { return true } else { return false }
-        }.count
-        let failed = fixer.jobs.filter {
-            if case .failed = $0.status { return true } else { return false }
-        }.count
-        let skipped = fixer.jobs.filter {
-            if case .skipped = $0.status { return true } else { return false }
-        }.count
-        return Text("成功 \(succeeded) · 跳过 \(skipped) · 失败 \(failed)")
+    // MARK: - Scan status
+
+    private var scanSection: some View {
+        Section {
+            if scanner.isScanning {
+                HStack(spacing: 12) {
+                    ProgressView().controlSize(.small)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("正在扫描…").font(.body)
+                        Text("已检查 \(scanner.scannedCount) 张 · 命中 \(scanner.matchedCount) 张")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } else {
+                HStack {
+                    Image(systemName: "checkmark.seal")
+                        .foregroundStyle(.green)
+                    VStack(alignment: .leading, spacing: 2) {
+                        if let finished = scanner.lastScanFinishedAt {
+                            Text("最近扫描于 \(finished.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.body)
+                        } else {
+                            Text("尚未扫描").font(.body)
+                        }
+                        if let err = scanner.lastErrorMessage {
+                            Text(err).font(.caption).foregroundStyle(.red)
+                        }
+                    }
+                    Spacer()
+                    Button {
+                        Task {
+                            await scanner.scan(modelContext: modelContext)
+                        }
+                    } label: {
+                        Label("重扫", systemImage: "arrow.clockwise")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(fixer.isProcessing)
+                }
+            }
+        } header: {
+            Text("扫描状态")
+        }
     }
+
+    // MARK: - Pending count
+
+    private var pendingSection: some View {
+        Section {
+            HStack(spacing: 16) {
+                Image(systemName: "photo.stack")
+                    .font(.title)
+                    .foregroundStyle(.tint)
+                    .frame(width: 40)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(pendingCandidates.count)")
+                        .font(.system(size: 32, weight: .semibold, design: .rounded))
+                    Text("张待修复照片")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            if !pendingCandidates.isEmpty {
+                DisclosureGroup("查看前 10 张") {
+                    ForEach(pendingCandidates.prefix(10)) { candidate in
+                        CandidateRow(candidate: candidate)
+                    }
+                }
+                .font(.subheadline)
+            }
+        } header: {
+            Text("待修复")
+        } footer: {
+            if pendingCandidates.isEmpty {
+                Text("没有命中的照片。Heifixer 会在照片库发生变化时自动重扫。")
+            }
+        }
+    }
+
+    // MARK: - Mode
+
+    private var modeSection: some View {
+        @Bindable var fixer = fixer
+        return Section {
+            Picker("修复模式", selection: $fixer.mode) {
+                ForEach(FixMode.allCases) { mode in
+                    Text(mode.title).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .disabled(fixer.isProcessing)
+            Text(fixer.mode.explanation)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } header: {
+            Text("修复模式")
+        }
+    }
+
+    // MARK: - Records link
+
+    private var recordsSection: some View {
+        Section {
+            NavigationLink {
+                RecordsView()
+            } label: {
+                Label("修复记录", systemImage: "list.bullet.clipboard")
+            }
+        }
+    }
+
+    // MARK: - Bottom button
 
     private var fixButton: some View {
         VStack(spacing: 0) {
             Divider()
             Button {
-                Task { await fixer.processAll() }
+                Task { await fixer.processPending(modelContext: modelContext) }
             } label: {
                 HStack {
                     if fixer.isProcessing {
                         ProgressView()
                             .controlSize(.small)
                             .tint(.white)
-                        Text("正在修复…")
+                        Text("正在修复 \(fixer.processedCount) / \(fixer.totalCount)…")
                     } else {
                         Image(systemName: "wand.and.stars")
-                        Text("开始修复")
+                        Text(startButtonTitle)
                     }
                 }
                 .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(fixer.isProcessing || !fixer.jobs.contains { $0.status == .pending })
+            .disabled(fixer.isProcessing || pendingCandidates.isEmpty)
             .padding()
         }
         .background(.bar)
     }
 
+    private var startButtonTitle: String {
+        if pendingCandidates.isEmpty {
+            "没有待修复的照片"
+        } else {
+            "修复这 \(pendingCandidates.count) 张"
+        }
+    }
+
+    // MARK: - Toolbar
+
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
+#if DEBUG
         ToolbarItem(placement: .primaryAction) {
-            PhotosPicker(
-                selection: $selection,
-                maxSelectionCount: nil,
-                matching: .images,
-                preferredItemEncoding: .current,
-                photoLibrary: .shared()
-            ) {
-                Label("添加照片", systemImage: "plus")
+            Button(role: .destructive) {
+                showResetConfirm = true
+            } label: {
+                Label("重置", systemImage: "arrow.counterclockwise.circle")
             }
-            .disabled(fixer.isProcessing)
+            .disabled(scanner.isScanning || fixer.isProcessing)
         }
-        if !fixer.jobs.isEmpty {
-            ToolbarItem(placement: .secondaryAction) {
-                Menu {
-                    Button(role: .destructive) {
-                        fixer.resetAll()
-                    } label: {
-                        Label("清空列表", systemImage: "trash")
-                    }
-                    Button {
-                        fixer.clearCompleted()
-                    } label: {
-                        Label("清除已完成", systemImage: "checkmark.circle")
-                    }
-                } label: {
-                    Label("更多", systemImage: "ellipsis.circle")
-                }
-                .disabled(fixer.isProcessing)
-            }
-        }
+#endif
     }
 }
 
 // MARK: - Row
 
-private struct FixJobRow: View {
-    let job: FixJob
+private struct CandidateRow: View {
+    let candidate: Candidate
 
     var body: some View {
         HStack(spacing: 12) {
-            statusIcon
-                .frame(width: 28, height: 28)
+            Image(systemName: icon)
+                .foregroundStyle(iconColor)
+                .frame(width: 28)
             VStack(alignment: .leading, spacing: 2) {
-                Text(job.displayName)
+                Text(candidate.originalFilename)
                     .font(.body)
                     .lineLimit(1)
                     .truncationMode(.middle)
-                subtitle
+                Text(subtitle)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -195,62 +266,31 @@ private struct FixJobRow: View {
         .padding(.vertical, 2)
     }
 
-    @ViewBuilder
-    private var statusIcon: some View {
-        switch job.status {
-        case .pending:
-            Image(systemName: "clock")
-                .foregroundStyle(.secondary)
-        case .processing:
-            ProgressView()
-        case .succeeded:
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
-        case .skipped:
-            Image(systemName: "minus.circle.fill")
-                .foregroundStyle(.orange)
-        case .failed:
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(.red)
-        }
-    }
-
-    private var subtitle: Text {
-        switch job.status {
-        case .pending:
-            Text(dimensionText)
-        case .processing:
-            Text("正在修复…")
-        case .succeeded(let wasReplaced):
-            if wasReplaced {
-                Text("已替换原图 · \(dimensionText)")
-            } else {
-                Text("已写入照片库 · \(dimensionText)")
-            }
-        case .skipped(let reason):
-            Text(reason)
-        case .failed(let message):
-            Text(message)
-        }
-    }
-
-    private var dimensionText: String {
-        if job.pixelWidth > 0 && job.pixelHeight > 0 {
-            "\(job.pixelWidth) × \(job.pixelHeight)"
+    private var subtitle: String {
+        if candidate.pixelWidth > 0 && candidate.pixelHeight > 0 {
+            "\(candidate.pixelWidth) × \(candidate.pixelHeight)"
         } else {
-            job.originalUTI ?? ""
+            "待修复"
         }
     }
-}
 
-// MARK: - Empty state
+    private var icon: String {
+        switch candidate.state {
+        case .pending: "clock"
+        case .processing: "gear"
+        case .fixed: "checkmark.circle.fill"
+        case .originalDeleted: "checkmark.seal.fill"
+        case .skipped: "minus.circle.fill"
+        case .failed: "exclamationmark.triangle.fill"
+        }
+    }
 
-private struct EmptyStateView: View {
-    var body: some View {
-        ContentUnavailableView {
-            Label("还没有照片", systemImage: "photo.on.rectangle.angled")
-        } description: {
-            Text("点击右上角的 + 选择需要修复的 HEIF 照片。\n（例如 Sony A6700 拍摄的 .HEIF 文件）")
+    private var iconColor: Color {
+        switch candidate.state {
+        case .pending, .processing: .secondary
+        case .fixed, .originalDeleted: .green
+        case .skipped: .orange
+        case .failed: .red
         }
     }
 }
@@ -309,4 +349,6 @@ private struct AuthorizationPromptView: View {
 #Preview {
     ContentView()
         .environment(PhotoFixer())
+        .environment(PhotoLibraryScanner())
+        .modelContainer(for: [Candidate.self, ScanState.self], inMemory: true)
 }
