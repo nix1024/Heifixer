@@ -39,22 +39,40 @@ struct HeifixerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            HomeView()
+            HeifixerRootView(modelContainer: modelContainer, monitor: monitor)
                 .environment(scanner)
                 .environment(fixer)
-                .task {
-                    // Request authorization up front if the user has not
-                    // answered the system prompt yet. Subsequent scans will
-                    // no-op if access is denied.
-                    if fixer.authorizationStatus == .notDetermined {
-                        await fixer.requestAuthorization()
-                    }
-                    if fixer.hasLibraryAccess {
-                        monitor.register()
-                        await scanner.scan(modelContext: modelContainer.mainContext)
-                    }
-                }
         }
         .modelContainer(modelContainer)
+    }
+}
+
+// MARK: - Root (onboarding vs home, scan when authorized)
+
+private struct HeifixerRootView: View {
+    let modelContainer: ModelContainer
+    let monitor: LibraryChangeMonitor
+    @Environment(PhotoFixer.self) private var fixer
+    @Environment(PhotoLibraryScanner.self) private var scanner
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        Group {
+            if fixer.hasLibraryAccess {
+                HomeView()
+            } else {
+                OnboardingView()
+            }
+        }
+        .onChange(of: scenePhase) { _, phase in
+            if phase == .active {
+                fixer.refreshAuthorizationStatus()
+            }
+        }
+        .task(id: fixer.authorizationStatus) {
+            guard fixer.hasLibraryAccess else { return }
+            monitor.register()
+            await scanner.scan(modelContext: modelContainer.mainContext)
+        }
     }
 }

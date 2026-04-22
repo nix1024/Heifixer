@@ -3,7 +3,6 @@
 //  Heifixer
 //
 
-import Photos
 import SwiftData
 import SwiftUI
 
@@ -30,13 +29,7 @@ struct HomeView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if fixer.hasLibraryAccess {
-                    mainContent
-                } else {
-                    AuthorizationPromptView()
-                }
-            }
+            mainContent
             .navigationTitle("Heifixer")
             .navigationSubtitle("")
             .toolbar { toolbarContent }
@@ -232,57 +225,6 @@ struct HomeView: View {
             .disabled(scanner.status.isScanning || fixer.status != .idle)
         }
 #endif
-    }
-}
-
-// MARK: - Authorization prompt
-
-private struct AuthorizationPromptView: View {
-    @Environment(PhotoFixer.self) private var fixer
-    @Environment(\.openURL) private var openURL
-
-    var body: some View {
-        ContentUnavailableView {
-            Label("需要照片库权限", systemImage: "lock.shield")
-        } description: {
-            Text(descriptionText)
-        } actions: {
-            Button(action: primaryAction) {
-                Text(buttonTitle)
-                    .frame(minWidth: 180)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-        }
-    }
-
-    private var descriptionText: String {
-        switch fixer.authorizationStatus {
-        case .denied, .restricted:
-            "Heifixer 需要读写您的照片库，才能读取原始照片并写回修复后的版本。请在「设置」中为 Heifixer 开启「所有照片」访问。"
-        default:
-            "Heifixer 需要读写您的照片库，才能读取原始照片并写回修复后的版本。"
-        }
-    }
-
-    private var buttonTitle: String {
-        switch fixer.authorizationStatus {
-        case .denied, .restricted: "前往设置"
-        default: "授权访问"
-        }
-    }
-
-    private func primaryAction() {
-        switch fixer.authorizationStatus {
-        case .denied, .restricted:
-#if os(iOS) || os(visionOS)
-            if let url = URL(string: UIApplication.openSettingsURLString) {
-                openURL(url)
-            }
-#endif
-        default:
-            Task { await fixer.requestAuthorization() }
-        }
     }
 }
 

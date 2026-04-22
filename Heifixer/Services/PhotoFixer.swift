@@ -104,6 +104,11 @@ final class PhotoFixer {
         self.authorizationStatus = status
     }
 
+    /// Re-read status from the system (e.g. after returning from Settings).
+    func refreshAuthorizationStatus() {
+        authorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    }
+
     var hasLibraryAccess: Bool {
         authorizationStatus == .authorized || authorizationStatus == .limited
     }
