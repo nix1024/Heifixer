@@ -31,16 +31,16 @@ enum FixMode: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .keepOriginal: "保留原图"
-        case .replaceOriginal: "替换原图"
+        case .replaceOriginal: "删除原图"
         }
     }
 
     var explanation: String {
         switch self {
         case .keepOriginal:
-            "在照片库中新建一张修复后的副本，原照片完全不动。"
+            "在照片库中新建一张修复后的副本，原照片保持不变。"
         case .replaceOriginal:
-            "新建修复后的照片并删除原照片（会保留所在自定义相簿）。批量处理完会统一弹一次系统删除确认。"
+            "新建修复后的照片并删除原照片（会保留所在自定义相簿）。"
         }
     }
 }
@@ -48,6 +48,8 @@ enum FixMode: String, CaseIterable, Identifiable {
 @Observable
 @MainActor
 final class PhotoFixer {
+    private static let fixModeDefaultsKey = "Heifixer.fixMode"
+
     // MARK: - Status
 
     /// Single source of truth for the fixer's run-time status. Using an
@@ -66,8 +68,23 @@ final class PhotoFixer {
 
     // MARK: - Configuration
 
-    var mode: FixMode = .keepOriginal
+    /// Persisted across launches via `UserDefaults`.
+    var mode: FixMode {
+        didSet {
+            UserDefaults.standard.set(mode.rawValue, forKey: Self.fixModeDefaultsKey)
+        }
+    }
+
     var authorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+
+    init() {
+        if let raw = UserDefaults.standard.string(forKey: Self.fixModeDefaultsKey),
+           let loaded = FixMode(rawValue: raw) {
+            mode = loaded
+        } else {
+            mode = .keepOriginal
+        }
+    }
 
     // MARK: - Observable status
 
