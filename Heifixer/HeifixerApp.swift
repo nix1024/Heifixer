@@ -39,7 +39,7 @@ struct HeifixerApp: App {
 
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            HomeView()
                 .environment(scanner)
                 .environment(fixer)
                 .task {

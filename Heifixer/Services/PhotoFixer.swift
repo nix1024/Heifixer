@@ -38,9 +38,9 @@ enum FixMode: String, CaseIterable, Identifiable {
     var explanation: String {
         switch self {
         case .keepOriginal:
-            "在照片库中新建一张 HEIC 副本，原 HEIF 完全不动。"
+            "在照片库中新建一张修复后的副本，原照片完全不动。"
         case .replaceOriginal:
-            "新建 HEIC 并删除原 HEIF（会保留所在自定义相簿）。批量处理完会统一弹一次系统删除确认。"
+            "新建修复后的照片并删除原照片（会保留所在自定义相簿）。批量处理完会统一弹一次系统删除确认。"
         }
     }
 }
@@ -262,7 +262,7 @@ final class PhotoFixer {
             // Common case: user tapped "Cancel" on the system prompt. The
             // new HEICs are preserved; the originals stay. Candidates stay
             // in `.fixed` so they still show up in records.
-            lastError = "原图删除已取消或失败：修复后的 HEIC 已保留，原 HEIF 仍在照片库中。（\(error.localizedDescription)）"
+            lastError = "原图删除已取消或失败：修复后的照片已保留，原照片仍在照片库中。（\(error.localizedDescription)）"
         }
     }
 
@@ -357,11 +357,11 @@ enum FixError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notHEIF: "该照片没有 HEIF 资源，已跳过。"
-        case .alreadyHEIC: "该照片已经是 HEIC 格式，无需修复。"
+        case .notHEIF: "该照片格式不支持，已跳过。"
+        case .alreadyHEIC: "该照片无需修复。"
         case .assetNotFound: "无法定位到原照片，可能已被删除。"
         case .unauthorized: "照片库访问未授权。"
-        case .notSony: "EXIF Make 不是 Sony，已跳过。"
+        case .notSony: "该照片不在支持范围内，已跳过。"
         case .cannotReadMetadata: "无法读取照片元数据。"
         }
     }

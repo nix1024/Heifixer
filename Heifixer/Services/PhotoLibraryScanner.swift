@@ -93,6 +93,12 @@ final class PhotoLibraryScanner {
             return
         }
 
+        #if DEBUG
+        // Artificial delay so the scanning hero card animation is visible
+        // during local iteration. Release builds run at full speed.
+        try? await Task.sleep(for: .seconds(3))
+        #endif
+
         let state = fetchOrCreateScanState(in: modelContext)
         let runStartedAt = Date()
         let isFullScan = state.firstScanCompletedAt == nil

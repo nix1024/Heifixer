@@ -1,5 +1,5 @@
 //
-//  ContentView.swift
+//  HomeView.swift
 //  Heifixer
 //
 
@@ -7,7 +7,7 @@ import Photos
 import SwiftData
 import SwiftUI
 
-struct ContentView: View {
+struct HomeView: View {
     @Environment(PhotoFixer.self) private var fixer
     @Environment(PhotoLibraryScanner.self) private var scanner
     @Environment(\.modelContext) private var modelContext
@@ -34,9 +34,8 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Heifixer")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbarTitleDisplayMode(.inlineLarge)
             .toolbar { toolbarContent }
+            .toolbarTitleDisplayMode(.inlineLarge)
             .onChange(of: fixer.lastError) { _, newValue in
                 showDeleteErrorAlert = newValue != nil
             }
@@ -84,19 +83,16 @@ struct ContentView: View {
             .frame(maxWidth: .infinity)
         }
         .safeAreaInset(edge: .bottom) { fixButton }
-        .animation(.smooth, value: pendingCandidates.isEmpty)
-        .animation(.smooth, value: scanner.isScanning)
-        .animation(.snappy, value: pendingCandidates.count)
     }
 
     // MARK: - Hero state mapping
 
     private var heroMode: HeroCard.Mode {
-         if scanner.isScanning {
+        if !pendingCandidates.isEmpty {
+            .pending(count: pendingCandidates.count, isScanning: scanner.isScanning)
+        } else if scanner.isScanning {
             .scanning(scanned: scanner.scannedCount, matched: scanner.matchedCount)
-         } else if !pendingCandidates.isEmpty {
-             .pending(count: pendingCandidates.count)
-         } else {
+        } else {
             .empty
         }
     }
@@ -243,52 +239,56 @@ struct HeroCard: View {
     enum Mode: Equatable {
         case empty
         case scanning(scanned: Int, matched: Int)
-        case pending(count: Int)
+        case pending(count: Int, isScanning: Bool)
     }
 
     let mode: Mode
 
     var body: some View {
-        switch mode {
-        case .empty:
-            EmptyHero()
-        case .scanning(let scanned, let matched):
-            ScanningHero(scannedCount: scanned, matchedCount: matched)
-        case .pending(let count):
-            PendingHero(count: count)
+        Group {
+            switch mode {
+            case .empty:
+                EmptyHero()
+            case .scanning(let scanned, let matched):
+                ScanningHero(scannedCount: scanned, matchedCount: matched)
+            case .pending(let count, let isScanning):
+                PendingHero(count: count, isScanning: isScanning)
+            }
         }
+        .glassEffect(
+            .regular,
+            in: .rect(cornerRadius: 28, style: .continuous)
+        )
     }
 }
 
 private struct PendingHero: View {
     let count: Int
+    let isScanning: Bool
 
     var body: some View {
         VStack(spacing: 18) {
             VStack(spacing: 4) {
-                Text("\(count)")
-                    .font(.system(size: 96, weight: .bold, design: .rounded))
-                    .contentTransition(.numericText(countsDown: true))
-                    .monospacedDigit()
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [.primary, .primary.opacity(0.7)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                HeroBigNumber(value: count, countsDown: true)
                 Text("张照片待修复")
                     .font(.headline)
                     .foregroundStyle(.secondary)
+            }
+
+            if isScanning {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在扫描照片库…")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .transition(.opacity.combined(with: .move(edge: .bottom)))
             }
         }
         .padding(.vertical, 32)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity)
-        .glassEffect(
-            .regular,
-            in: .rect(cornerRadius: 28, style: .continuous)
-        )
     }
 }
 
@@ -297,28 +297,27 @@ private struct ScanningHero: View {
     let matchedCount: Int
 
     var body: some View {
-        VStack(spacing: 14) {
-            ProgressView()
-                .controlSize(.large)
-            Text("正在扫描照片库")
-                .font(.system(.title2, design: .rounded, weight: .semibold))
-            VStack(spacing: 2) {
+        VStack(spacing: 18) {
+            VStack(spacing: 4) {
+                HeroBigNumber(value: matchedCount, countsDown: false)
+                Text("张照片待修复")
+                    .font(.headline)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
                 Text("已检查 \(scannedCount) 张")
                     .monospacedDigit()
-                Text("命中 \(matchedCount) 张照片")
-                    .monospacedDigit()
+                    .contentTransition(.numericText())
             }
             .font(.subheadline)
             .foregroundStyle(.secondary)
-            .contentTransition(.numericText())
         }
-        .padding(.vertical, 40)
+        .padding(.vertical, 32)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity)
-        .glassEffect(
-            .regular,
-            in: .rect(cornerRadius: 28, style: .continuous)
-        )
     }
 }
 
@@ -339,46 +338,71 @@ private struct EmptyHero: View {
         .padding(.vertical, 40)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity)
-        .glassEffect(
-            .regular,
-            in: .rect(cornerRadius: 28, style: .continuous)
-        )
+    }
+}
+
+/// Shared large numeric display used by both the scanning and pending hero
+/// states so the matched count morphs smoothly into the final pending count.
+private struct HeroBigNumber: View {
+    let value: Int
+    let countsDown: Bool
+
+    var body: some View {
+        Text("\(value)")
+            .font(.system(size: 96, weight: .bold, design: .rounded))
+            .contentTransition(.numericText(countsDown: countsDown))
+            .monospacedDigit()
+            .foregroundStyle(
+                LinearGradient(
+                    colors: [.primary, .primary.opacity(0.7)],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+            )
     }
 }
 
 // MARK: - Previews
 
 #Preview("Home") {
-    ContentView()
+    HomeView()
         .environment(PhotoFixer())
         .environment(PhotoLibraryScanner())
         .modelContainer(for: [Candidate.self, ScanState.self], inMemory: true)
 }
 
 #Preview("Hero") {
-    @Previewable @Namespace var namespace
-    @Previewable @Namespace var idleNamespace
+    @Previewable @Namespace var emptyNamespace
     @Previewable @Namespace var scanningNamespace
-    
+    @Previewable @Namespace var pendingNamespace
+    @Previewable @Namespace var pendingScanningNamespace
+
     ScrollView {
-        VStack {
+        VStack(spacing: 24) {
             GlassEffectContainer(spacing: 20) {
                 HeroCard(mode: .empty)
-                    .glassEffectID("hero", in: namespace)
+                    .glassEffectID("hero", in: emptyNamespace)
             }
-            .padding()
-            
+            .padding(.horizontal)
+
             GlassEffectContainer(spacing: 20) {
                 HeroCard(mode: .scanning(scanned: 1_284, matched: 17))
-                    .glassEffectID("hero", in: namespace)
+                    .glassEffectID("hero", in: scanningNamespace)
             }
-            .padding()
-            
+            .padding(.horizontal)
+
             GlassEffectContainer(spacing: 20) {
-                HeroCard(mode: .pending(count: 42))
-                    .glassEffectID("hero", in: idleNamespace)
+                HeroCard(mode: .pending(count: 42, isScanning: false))
+                    .glassEffectID("hero", in: pendingNamespace)
             }
-            .padding()
+            .padding(.horizontal)
+
+            GlassEffectContainer(spacing: 20) {
+                HeroCard(mode: .pending(count: 42, isScanning: true))
+                    .glassEffectID("hero", in: pendingScanningNamespace)
+            }
+            .padding(.horizontal)
         }
+        .padding(.vertical)
     }
 }
