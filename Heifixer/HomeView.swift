@@ -306,13 +306,18 @@ private struct CountHero: View {
     let isScanning: Bool
 
     var body: some View {
-        VStack(spacing: 18) {
-            VStack {
+        VStack(alignment: .leading) {
+            VStack(alignment: .leading) {
+                HStack {
+                    Image(systemName: "photo.on.rectangle.angled")
+                    Text("待修复照片")
+                        .font(.headline)
+                }
+                .foregroundStyle(.secondary)
+                
                 HeroBigNumber(value: count, countsDown: !isScanning)
-                Text("张照片待修复")
-                    .font(.headline)
-                    .foregroundStyle(.secondary)
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
 
             if isScanning {
                 HStack(spacing: 8) {
@@ -327,28 +332,28 @@ private struct CountHero: View {
         }
         .padding(.vertical, 32)
         .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity)
         .animation(.snappy, value: isScanning)
     }
 }
 
 private struct EmptyHero: View {
     var body: some View {
-        VStack(spacing: 14) {
+        VStack(alignment: .leading) {
             Image(systemName: "sparkles")
                 .font(.system(size: 56, weight: .regular))
                 .symbolRenderingMode(.hierarchical)
                 .foregroundStyle(.tint)
             Text("一切就绪")
                 .font(.system(.title, design: .rounded, weight: .semibold))
-            Text("没有需要修复的照片。\n新照片加入照片库时，Heifixer 会自动检测。")
+                .padding(.top)
+            Text("没有需要修复的照片。新照片加入照片库时，Heifixer 会自动检测。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.leading)
         }
-        .padding(.vertical, 40)
-        .padding(.horizontal, 24)
         .frame(maxWidth: .infinity)
+        .padding(.vertical, 32)
+        .padding(.horizontal)
     }
 }
 
