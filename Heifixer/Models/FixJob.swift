@@ -11,7 +11,9 @@ final class FixJob: Identifiable {
     enum Status: Equatable {
         case pending
         case processing
-        case succeeded(newAssetID: String?)
+        /// A replacement new asset has been written to the library.
+        /// `wasReplaced` is true when the original HEIF was also deleted.
+        case succeeded(wasReplaced: Bool)
         case skipped(reason: String)
         case failed(message: String)
 

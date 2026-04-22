@@ -12,8 +12,10 @@ import SwiftUI
 struct ContentView: View {
     @Environment(PhotoFixer.self) private var fixer
     @State private var selection: [PhotosPickerItem] = []
+    @State private var showDeleteErrorAlert = false
 
     var body: some View {
+        @Bindable var fixer = fixer
         NavigationStack {
             Group {
                 if fixer.hasLibraryAccess {
@@ -29,6 +31,14 @@ struct ContentView: View {
                 let picked = selection
                 selection = []
                 fixer.addJobs(from: picked)
+            }
+            .onChange(of: fixer.lastError) { _, newValue in
+                showDeleteErrorAlert = newValue != nil
+            }
+            .alert("原图未删除", isPresented: $showDeleteErrorAlert) {
+                Button("好") { fixer.lastError = nil }
+            } message: {
+                Text(fixer.lastError ?? "")
             }
         }
         .task {
@@ -48,7 +58,23 @@ struct ContentView: View {
     }
 
     private var jobList: some View {
-        List {
+        @Bindable var fixer = fixer
+        return List {
+            Section {
+                Picker("修复模式", selection: $fixer.mode) {
+                    ForEach(FixMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(fixer.isProcessing)
+                Text(fixer.mode.explanation)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("修复模式")
+            }
+
             Section {
                 ForEach(fixer.jobs) { job in
                     FixJobRow(job: job)
@@ -195,8 +221,12 @@ private struct FixJobRow: View {
             Text(dimensionText)
         case .processing:
             Text("正在修复…")
-        case .succeeded:
-            Text("已写入照片库 · \(dimensionText)")
+        case .succeeded(let wasReplaced):
+            if wasReplaced {
+                Text("已替换原图 · \(dimensionText)")
+            } else {
+                Text("已写入照片库 · \(dimensionText)")
+            }
         case .skipped(let reason):
             Text(reason)
         case .failed(let message):

@@ -8,12 +8,42 @@ import Photos
 import PhotosUI
 import SwiftUI
 
+enum FixMode: String, CaseIterable, Identifiable {
+    /// Create a new HEIC asset; leave the original HEIF untouched.
+    case keepOriginal
+    /// Create a new HEIC asset and delete the original HEIF (batched at the end of processing).
+    case replaceOriginal
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .keepOriginal: "保留原图"
+        case .replaceOriginal: "替换原图"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .keepOriginal:
+            "在照片库中新建一张 HEIC 副本，原 HEIF 完全不动。"
+        case .replaceOriginal:
+            "新建 HEIC 并删除原 HEIF（会保留所在自定义相簿）。批量处理完会统一弹一次系统删除确认。"
+        }
+    }
+}
+
 @Observable
 final class PhotoFixer {
     var jobs: [FixJob] = []
     var isProcessing: Bool = false
+    var mode: FixMode = .keepOriginal
     var authorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
     var lastError: String?
+
+    /// Replacements that have been prepared (new HEIC created) but whose originals
+    /// still need to be deleted at the end of `processAll`.
+    private var pendingReplacements: [(job: FixJob, originalAsset: PHAsset)] = []
 
     // MARK: - Authorization
 
@@ -76,18 +106,29 @@ final class PhotoFixer {
     func processAll() async {
         guard !isProcessing else { return }
         isProcessing = true
+        lastError = nil
+        pendingReplacements.removeAll()
         defer { isProcessing = false }
+
+        // Snapshot mode for this run so mid-run toggles don't cause mixed behavior.
+        let runMode = mode
 
         let pending = jobs.filter { !$0.status.isTerminal || $0.status == .pending }
         for job in pending {
-            await process(job)
+            await process(job, mode: runMode)
+        }
+
+        // Batched deletion: one system prompt covers every replaced original.
+        if runMode == .replaceOriginal, !pendingReplacements.isEmpty {
+            await flushPendingDeletions()
         }
     }
 
-    func process(_ job: FixJob) async {
+    func process(_ job: FixJob, mode: FixMode? = nil) async {
+        let runMode = mode ?? self.mode
         job.status = .processing
         do {
-            try await fix(job)
+            try await fix(job, mode: runMode)
         } catch let error as FixError {
             switch error {
             case .notHEIF, .alreadyHEIC:
@@ -102,7 +143,7 @@ final class PhotoFixer {
 
     // MARK: - Core fix
 
-    private func fix(_ job: FixJob) async throws {
+    private func fix(_ job: FixJob, mode: FixMode) async throws {
         guard hasLibraryAccess else {
             throw FixError.unauthorized
         }
@@ -130,7 +171,25 @@ final class PhotoFixer {
             try? FileManager.default.removeItem(at: tempURL)
         }
 
-        let creationDate = job.creationDate
+        // Copy metadata that determines where the new asset lands in the Photos
+        // timeline. `creationDate` controls position in the main Library tab
+        // (grouped by shot date). `isFavorite` is Apple-specific metadata not
+        // present in EXIF, so we must copy it explicitly. Location is already
+        // in the HEIF's EXIF GPS block and Photos will re-extract it on import,
+        // so we don't need to set `request.location` manually.
+        // NOTE: `PHAsset.dateAdded` is assigned by the system at insert time
+        // and is not settable via public API, so the new asset always appears
+        // newest in the "Recents" smart album.
+        let creationDate = asset.creationDate
+        let isFavorite = asset.isFavorite
+        // When replacing, mirror the original's custom-album membership onto the
+        // new asset so the user doesn't lose organization. Smart albums
+        // (Favorites, Selfies, Panoramas, ...) are owned by the system and we
+        // skip them; `canPerform(.addContent)` filters those out.
+        let userAlbums: [PHAssetCollection] = (mode == .replaceOriginal)
+            ? Self.userAlbumsContaining(asset)
+            : []
+
         try await PHPhotoLibrary.shared().performChanges {
             let request = PHAssetCreationRequest.forAsset()
             let opts = PHAssetResourceCreationOptions()
@@ -140,9 +199,48 @@ final class PhotoFixer {
             if let creationDate {
                 request.creationDate = creationDate
             }
+            request.isFavorite = isFavorite
+
+            if let placeholder = request.placeholderForCreatedAsset {
+                for album in userAlbums {
+                    if let albumRequest = PHAssetCollectionChangeRequest(for: album) {
+                        albumRequest.addAssets([placeholder] as NSArray)
+                    }
+                }
+            }
         }
 
-        job.status = .succeeded(newAssetID: nil)
+        // The new asset exists; queue the original for deletion if replacing.
+        // We defer deletion so that ONE system prompt covers the whole batch.
+        if mode == .replaceOriginal {
+            pendingReplacements.append((job, asset))
+        }
+
+        job.status = .succeeded(wasReplaced: false)
+    }
+
+    // MARK: - Batched deletion
+
+    private func flushPendingDeletions() async {
+        let targets = pendingReplacements
+        pendingReplacements.removeAll()
+        let assets = targets.map(\.originalAsset)
+
+        do {
+            try await PHPhotoLibrary.shared().performChanges {
+                PHAssetChangeRequest.deleteAssets(assets as NSArray)
+            }
+            for t in targets {
+                if case .succeeded = t.job.status {
+                    t.job.status = .succeeded(wasReplaced: true)
+                }
+            }
+        } catch {
+            // Most common case: user tapped "取消" on the system delete prompt.
+            // New HEICs remain; originals also remain. The jobs are already
+            // marked `.succeeded(wasReplaced: false)` from the create phase.
+            lastError = "原图删除已取消或失败：修复后的 HEIC 已保留，原 HEIF 仍在照片库中。（\(error.localizedDescription)）"
+        }
     }
 
     // MARK: - Helpers
@@ -185,6 +283,22 @@ final class PhotoFixer {
         case .alternatePhoto: 2
         default: 10
         }
+    }
+
+    nonisolated private static func userAlbumsContaining(_ asset: PHAsset) -> [PHAssetCollection] {
+        let result = PHAssetCollection.fetchAssetCollectionsContaining(
+            asset,
+            with: .album,
+            options: nil
+        )
+        var albums: [PHAssetCollection] = []
+        for index in 0..<result.count {
+            let album = result.object(at: index)
+            if album.canPerform(.addContent) {
+                albums.append(album)
+            }
+        }
+        return albums
     }
 
     nonisolated private static func writeResource(_ resource: PHAssetResource, to url: URL) async throws {
