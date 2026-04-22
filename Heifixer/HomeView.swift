@@ -307,7 +307,7 @@ private struct CountHero: View {
 
     var body: some View {
         VStack(spacing: 18) {
-            VStack(spacing: 4) {
+            VStack {
                 HeroBigNumber(value: count, countsDown: !isScanning)
                 Text("张照片待修复")
                     .font(.headline)
