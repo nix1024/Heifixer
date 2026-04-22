@@ -92,8 +92,8 @@ struct HomeView: View {
         if !pendingCandidates.isEmpty {
             return .pending(count: pendingCandidates.count)
         }
-        if case .scanning(let scanned, _, let matched) = scanner.status {
-            return .scanning(scanned: scanned, matched: matched)
+        if case .scanning(_, _, let matched) = scanner.status {
+            return .scanning(matched: matched)
         }
         return .empty
     }
@@ -273,7 +273,7 @@ private struct AuthorizationPromptView: View {
 struct HeroCard: View {
     enum Mode: Equatable {
         case empty
-        case scanning(scanned: Int, matched: Int)
+        case scanning(matched: Int)
         case pending(count: Int)
     }
 
@@ -284,10 +284,10 @@ struct HeroCard: View {
             switch mode {
             case .empty:
                 EmptyHero()
-            case .scanning(let scanned, let matched):
-                ScanningHero(scannedCount: scanned, matchedCount: matched)
+            case .scanning(let matched):
+                CountHero(count: matched, isScanning: true)
             case .pending(let count):
-                PendingHero(count: count)
+                CountHero(count: count, isScanning: false)
             }
         }
         .glassEffect(
@@ -297,48 +297,38 @@ struct HeroCard: View {
     }
 }
 
-private struct PendingHero: View {
+/// Shared hero body for both "scanning" and "pending" states. Keeping them
+/// in a single view preserves the `HeroBigNumber`'s identity across the
+/// scanning → pending handoff so the numeric content transition actually
+/// animates when the final matched count becomes the pending count.
+private struct CountHero: View {
     let count: Int
-
-    var body: some View {
-        VStack(spacing: 4) {
-            HeroBigNumber(value: count, countsDown: true)
-            Text("张照片待修复")
-                .font(.headline)
-                .foregroundStyle(.secondary)
-        }
-        .padding(.vertical, 32)
-        .padding(.horizontal, 24)
-        .frame(maxWidth: .infinity)
-    }
-}
-
-private struct ScanningHero: View {
-    let scannedCount: Int
-    let matchedCount: Int
+    let isScanning: Bool
 
     var body: some View {
         VStack(spacing: 18) {
             VStack(spacing: 4) {
-                HeroBigNumber(value: matchedCount, countsDown: false)
+                HeroBigNumber(value: count, countsDown: !isScanning)
                 Text("张照片待修复")
                     .font(.headline)
                     .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 8) {
-                ProgressView()
-                    .controlSize(.small)
-                Text("已检查 \(scannedCount) 张")
-                    .monospacedDigit()
-                    .contentTransition(.numericText())
+            if isScanning {
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("扫描中…")
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .transition(.opacity)
             }
-            .font(.subheadline)
-            .foregroundStyle(.secondary)
         }
         .padding(.vertical, 32)
         .padding(.horizontal, 24)
         .frame(maxWidth: .infinity)
+        .animation(.snappy, value: isScanning)
     }
 }
 
@@ -380,6 +370,11 @@ private struct HeroBigNumber: View {
                     endPoint: .bottom
                 )
             )
+            // `.contentTransition(.numericText)` only animates when the value
+            // change happens inside an animation context. Binding a spring
+            // here guarantees the rolling-digit effect regardless of whether
+            // upstream state flips inside `withAnimation`.
+            .animation(.snappy, value: value)
     }
 }
 
@@ -406,7 +401,7 @@ private struct HeroBigNumber: View {
             .padding(.horizontal)
 
             GlassEffectContainer(spacing: 20) {
-                HeroCard(mode: .scanning(scanned: 1_284, matched: 17))
+                HeroCard(mode: .scanning(matched: 17))
                     .glassEffectID("hero", in: scanningNamespace)
             }
             .padding(.horizontal)
