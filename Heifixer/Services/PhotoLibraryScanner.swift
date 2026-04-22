@@ -16,17 +16,37 @@ import SwiftData
 @Observable
 @MainActor
 final class PhotoLibraryScanner {
-    // MARK: - Observable progress state
+    // MARK: - Status
 
-    private(set) var isScanning: Bool = false
-    /// Number of PHAssets visited during the most recent (or current) scan.
-    private(set) var scannedCount: Int = 0
-    /// Number of candidates upserted during the most recent (or current) scan.
-    private(set) var matchedCount: Int = 0
-    /// End time of the last completed scan. `nil` until one completes.
-    private(set) var lastScanFinishedAt: Date?
-    /// Human-readable error from the most recent scan, cleared on success.
-    private(set) var lastErrorMessage: String?
+    /// Single source of truth for the scanner's lifecycle. Using an enum
+    /// collapses several previously-separate properties (`isScanning`,
+    /// progress counters, `lastScanFinishedAt`, `lastErrorMessage`) into one
+    /// so callers can drive all status UI off one value, and so mutually
+    /// exclusive outcomes (success vs. failure) cannot coexist.
+    enum Status: Equatable {
+        /// No scan has run yet in this app lifetime.
+        case none
+        /// A scan is in flight. `total` is set once the `PHFetchResult` is
+        /// built (may be 0 briefly at the very start of the run or during
+        /// the DEBUG warm-up sleep). `scanned` / `matched` tick up live.
+        case scanning(scanned: Int, total: Int, matched: Int)
+        /// The most recent scan finished successfully. `at` is the
+        /// completion timestamp; counts reflect the final tally.
+        case completed(at: Date, scanned: Int, total: Int, matched: Int)
+        /// The most recent scan failed. `message` is a user-facing,
+        /// localized string suitable for display.
+        case failed(message: String)
+
+        /// True only while actively scanning. Convenient shorthand for
+        /// "are we busy right now?" gates in the UI.
+        var isScanning: Bool {
+            if case .scanning = self { true } else { false }
+        }
+    }
+
+    // MARK: - Observable status
+
+    private(set) var status: Status = .none
 
     // MARK: - Configuration
 
@@ -35,7 +55,7 @@ final class PhotoLibraryScanner {
     /// limit is disabled (nil).
     private static var debugFullScanLimit: Int? {
         #if DEBUG
-        return 20
+        return 10
         #else
         return nil
         #endif
@@ -57,21 +77,18 @@ final class PhotoLibraryScanner {
 
     #if DEBUG
     /// Debug-only: wipe all persisted state (Candidate + ScanState) and
-    /// reset observable counters. Next `scan()` will run in full-library
+    /// reset the observable status. Next `scan()` will run in full-library
     /// mode again. Intended for developer iteration in the simulator.
     func resetAll(modelContext: ModelContext) {
         // Don't run destructive cleanup while a scan is in flight; caller
         // should gate the UI, but we defend regardless.
-        guard !isScanning else { return }
+        guard !status.isScanning else { return }
 
         try? modelContext.delete(model: Candidate.self)
         try? modelContext.delete(model: ScanState.self)
         try? modelContext.save()
 
-        scannedCount = 0
-        matchedCount = 0
-        lastScanFinishedAt = nil
-        lastErrorMessage = nil
+        status = .none
     }
     #endif
 
@@ -79,17 +96,13 @@ final class PhotoLibraryScanner {
     /// `ScanState.firstScanCompletedAt`. Guards against concurrent runs so
     /// observer-triggered rescans can't race with an initial launch scan.
     func scan(modelContext: ModelContext) async {
-        guard !isScanning else { return }
-        isScanning = true
-        scannedCount = 0
-        matchedCount = 0
-        lastErrorMessage = nil
-        defer { isScanning = false }
+        guard !status.isScanning else { return }
+        status = .scanning(scanned: 0, total: 0, matched: 0)
 
         guard PHPhotoLibrary.authorizationStatus(for: .readWrite) == .authorized
             || PHPhotoLibrary.authorizationStatus(for: .readWrite) == .limited
         else {
-            lastErrorMessage = "照片库访问未授权，无法扫描。"
+            status = .failed(message: "照片库访问未授权，无法扫描。")
             return
         }
 
@@ -99,42 +112,52 @@ final class PhotoLibraryScanner {
         try? await Task.sleep(for: .seconds(3))
         #endif
 
-        let state = fetchOrCreateScanState(in: modelContext)
+        let scanState = fetchOrCreateScanState(in: modelContext)
         let runStartedAt = Date()
-        let isFullScan = state.firstScanCompletedAt == nil
+        let isFullScan = scanState.firstScanCompletedAt == nil
 
         let fetch = makeFetchResult(
             isFullScan: isFullScan,
-            cutoff: state.lastScanAt
+            cutoff: scanState.lastScanAt
         )
+        let total = fetch.count
+        var scanned = 0
+        var matched = 0
+        status = .scanning(scanned: 0, total: total, matched: 0)
 
         // Process synchronously on the main actor. `PHFetchResult` access is
         // thread-safe but the SwiftData `ModelContext` we write to is
         // MainActor-isolated in this app, so staying on the main queue
         // keeps the code simple. Inserts are cheap; the expensive part
         // (EXIF read) was removed from the scanner entirely.
-        for index in 0..<fetch.count {
+        for index in 0..<total {
             let asset = fetch.object(at: index)
-            scannedCount += 1
+            scanned += 1
             if let candidate = evaluate(asset: asset, in: modelContext) {
-                matchedCount += 1
+                matched += 1
                 _ = candidate
             }
+            status = .scanning(scanned: scanned, total: total, matched: matched)
         }
 
         // Persist on success. We update `lastScanAt` to the start of this
         // run (not end) so any asset that was added *during* the scan is
         // still picked up by the next incremental pass.
-        state.lastScanAt = runStartedAt
+        scanState.lastScanAt = runStartedAt
         if isFullScan {
-            state.firstScanCompletedAt = runStartedAt
+            scanState.firstScanCompletedAt = runStartedAt
         }
 
         do {
             try modelContext.save()
-            lastScanFinishedAt = Date()
+            status = .completed(
+                at: Date(),
+                scanned: scanned,
+                total: total,
+                matched: matched
+            )
         } catch {
-            lastErrorMessage = "扫描结果保存失败：\(error.localizedDescription)"
+            status = .failed(message: "扫描结果保存失败：\(error.localizedDescription)")
         }
     }
 
@@ -225,9 +248,9 @@ final class PhotoLibraryScanner {
         if let existing = try? context.fetch(descriptor).first {
             return existing
         }
-        let state = ScanState()
-        context.insert(state)
-        return state
+        let scanState = ScanState()
+        context.insert(scanState)
+        return scanState
     }
 
     /// Insert a new Candidate if none exists for the given PHAsset id. If a

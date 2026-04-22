@@ -48,18 +48,30 @@ enum FixMode: String, CaseIterable, Identifiable {
 @Observable
 @MainActor
 final class PhotoFixer {
+    // MARK: - Status
+
+    /// Single source of truth for the fixer's run-time status. Using an
+    /// enum (instead of multiple booleans) makes illegal combinations like
+    /// "cleaning up but not processing" unrepresentable, and lets the UI
+    /// drive both the busy gate and the status label off one value.
+    enum Status: Equatable {
+        case idle
+        /// Iterating candidates and writing new assets. `processed` advances
+        /// after each candidate; `total` is fixed for the run.
+        case fixing(processed: Int, total: Int)
+        /// Batched original-deletion prompt/commit at the tail of a
+        /// `replaceOriginal` run.
+        case cleaningUp
+    }
+
     // MARK: - Configuration
 
     var mode: FixMode = .keepOriginal
     var authorizationStatus: PHAuthorizationStatus = PHPhotoLibrary.authorizationStatus(for: .readWrite)
 
-    // MARK: - Observable progress state
+    // MARK: - Observable status
 
-    private(set) var isProcessing: Bool = false
-    /// Number of candidates processed in the current/most-recent run.
-    private(set) var processedCount: Int = 0
-    /// Total candidates in the current run (set at start of `processPending`).
-    private(set) var totalCount: Int = 0
+    private(set) var status: Status = .idle
     /// Surfaced to the UI for non-fatal notices (e.g. batch delete cancelled).
     var lastError: String?
 
@@ -86,15 +98,14 @@ final class PhotoFixer {
     /// each candidate completes. Safe to call while scanning is in flight;
     /// new candidates that appear mid-run are deferred to the next call.
     func processPending(modelContext: ModelContext) async {
-        guard !isProcessing else { return }
+        guard case .idle = status else { return }
         guard hasLibraryAccess else {
             lastError = "照片库访问未授权。"
             return
         }
-        isProcessing = true
         lastError = nil
         pendingReplacements.removeAll()
-        defer { isProcessing = false }
+        defer { status = .idle }
 
         let runMode = mode
         let pendingRaw = Candidate.State.pending.rawValue
@@ -111,12 +122,12 @@ final class PhotoFixer {
             return
         }
 
-        totalCount = candidates.count
-        processedCount = 0
+        let total = candidates.count
+        status = .fixing(processed: 0, total: total)
 
-        for candidate in candidates {
+        for (index, candidate) in candidates.enumerated() {
             await process(candidate, mode: runMode, in: modelContext)
-            processedCount += 1
+            status = .fixing(processed: index + 1, total: total)
         }
 
         // Persist everything we changed per-candidate; SwiftData autosaves
@@ -125,6 +136,7 @@ final class PhotoFixer {
         try? modelContext.save()
 
         if runMode == .replaceOriginal, !pendingReplacements.isEmpty {
+            status = .cleaningUp
             await flushPendingDeletions(modelContext: modelContext)
             try? modelContext.save()
         }
