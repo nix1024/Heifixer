@@ -34,7 +34,7 @@ struct HomeView: View {
                 }
             }
             .navigationTitle("Heifixer")
-            .navigationSubtitle(statusSubtitle)
+            .navigationSubtitle("")
             .toolbar { toolbarContent }
             .toolbarTitleDisplayMode(.inlineLarge)
             .onChange(of: fixer.lastError) { _, newValue in
@@ -69,18 +69,22 @@ struct HomeView: View {
 
     private var mainContent: some View {
         ScrollView {
-            VStack(spacing: 24) {
-                GlassEffectContainer(spacing: 20) {
+            VStack {
+                GlassEffectContainer {
                     HeroCard(mode: heroMode)
                         .glassEffectID("hero", in: glassNamespace)
                 }
                 .padding(.horizontal)
 
+                homeHeroStatusCaption
+                    .padding(.horizontal)
+                    .padding(.horizontal)
+                    .padding(.top, 8)
+
                 modeCard
                     .padding(.horizontal)
+                    .padding(.top, 24)
             }
-            .padding(.top, 24)
-            .padding(.bottom, 120)
             .frame(maxWidth: .infinity)
         }
         .safeAreaInset(edge: .bottom) { fixButton }
@@ -98,17 +102,37 @@ struct HomeView: View {
         return .empty
     }
 
-    // MARK: - Navigation subtitle
+    // MARK: - Hero-adjacent status
 
-    /// Compact, at-a-glance status shown under the navigation title.
-    /// Priority: ongoing work (cleanup > fix > scan) beats transient
-    /// "just finished" notices. An empty string hides the subtitle.
-    private var statusSubtitle: String {
+    /// Shown directly under the glass hero card (not in the navigation bar) so
+    /// status stays visually tied to the main metric and long messages are
+    /// not squeezed into the large-title chrome.
+    private var homeHeroStatusCaption: some View {
+        let payload = homeHeroStatusPayload
+        return Group {
+            if !payload.text.isEmpty {
+                HStack(alignment: .center, spacing: 8) {
+                    if payload.showsProgress {
+                        ProgressView()
+                            .controlSize(.small)
+                    } 
+                    Text(payload.text)
+                        .font(.subheadline)
+                        .foregroundStyle(payload.isFailure ? .red : .secondary)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private var homeHeroStatusPayload: (text: String, showsProgress: Bool, isFailure: Bool) {
         switch fixer.status {
         case .cleaningUp:
-            return "正在清理原图…"
+            return ("正在清理原图…", true, false)
         case .fixing(let processed, let total):
-            return "正在修复 \(processed) / \(total)"
+            return ("正在修复 \(processed) / \(total)", true, false)
         case .idle:
             break
         }
@@ -117,13 +141,14 @@ struct HomeView: View {
             // `total` is only known after the PHFetchResult is built; before
             // that (e.g. during the DEBUG warm-up sleep) fall back to the
             // indeterminate label so we never render "X / 0".
-            return total > 0 ? "正在扫描 \(scanned) / \(total)" : "正在扫描…"
+            let line = total > 0 ? "正在扫描 \(scanned) / \(total)" : "正在扫描…"
+            return (line, true, false)
         case .completed:
-            return "扫描完成"
+            return ("扫描完成", false, false)
         case .failed(let message):
-            return message
+            return (message, false, true)
         case .none:
-            return ""
+            return ("", false, false)
         }
     }
 
@@ -292,7 +317,7 @@ struct HeroCard: View {
         }
         .glassEffect(
             .regular,
-            in: .rect(cornerRadius: 28, style: .continuous)
+            in: .rect(cornerRadius: 32, style: .continuous)
         )
     }
 }
@@ -314,25 +339,12 @@ private struct CountHero: View {
                         .font(.headline)
                 }
                 .foregroundStyle(.secondary)
-                
+
                 HeroBigNumber(value: count, countsDown: !isScanning)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-
-            if isScanning {
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("扫描中…")
-                }
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .transition(.opacity)
-            }
         }
-        .padding(.vertical, 32)
-        .padding(.horizontal, 24)
-        .animation(.snappy, value: isScanning)
+        .padding()
     }
 }
 
