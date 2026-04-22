@@ -67,7 +67,7 @@ struct HomeView: View {
     private var mainContent: some View {
         Form {
             Section {
-                HeroCard(mode: heroMode)
+                HeroCard(count: pendingCandidates.count, isScanning: scanner.status.isScanning)
             } footer: {
                 heroSectionFooter
             }
@@ -81,41 +81,28 @@ struct HomeView: View {
                     )
                 )
                 .disabled(fixer.status != .idle)
-
-                if !fixedCandidates.isEmpty {
+            } footer: {
+                Text(fixer.mode.explanation)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            
+            if !fixedCandidates.isEmpty {
+                Section {
                     Button(role: .destructive) {
                         Task { await fixer.deleteFixedOriginals(modelContext: modelContext) }
                     } label: {
                         Text("删除 \(fixedCandidates.count) 张原图")
                     }
                     .disabled(fixer.status != .idle || scanner.status.isScanning)
-                }
-            } footer: {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text(fixer.mode.explanation)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if !fixedCandidates.isEmpty {
-                        Text(
-                            "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
-                        )
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                } footer: {
+                    Text(
+                        "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }
         .safeAreaInset(edge: .bottom) { fixButton }
-    }
-
-    // MARK: - Hero state mapping
-
-    private var heroMode: HeroCard.Mode {
-        if !pendingCandidates.isEmpty {
-            return .pending(count: pendingCandidates.count)
-        }
-        if case .scanning(_, _, let matched) = scanner.status {
-            return .scanning(matched: matched)
-        }
-        return .empty
     }
 
     // MARK: - Hero section footer (status)
@@ -230,27 +217,18 @@ struct HomeView: View {
 
 // MARK: - Hero card
 
-/// Self-contained hero card for the home screen. Takes a pure value `Mode`
-/// input so each visual state is easy to preview in isolation — the card
-/// does not read any environment or services.
+/// Self-contained hero for the home screen — no environment; preview with
+/// `count` and `isScanning` only.
 struct HeroCard: View {
-    enum Mode: Equatable {
-        case empty
-        case scanning(matched: Int)
-        case pending(count: Int)
-    }
-
-    let mode: Mode
+    let count: Int
+    let isScanning: Bool
 
     var body: some View {
         Group {
-            switch mode {
-            case .empty:
+            if count == 0 {
                 EmptyHero()
-            case .scanning(let matched):
-                CountHero(count: matched, isScanning: true)
-            case .pending(let count):
-                CountHero(count: count, isScanning: false)
+            } else {
+                CountHero(count: count, isScanning: isScanning)
             }
         }
     }
@@ -308,7 +286,7 @@ private struct HeroBigNumber: View {
 
     var body: some View {
         Text("\(value)")
-            .font(.system(size: 96, weight: .bold, design: .rounded))
+            .font(.system(size: 64, weight: .bold, design: .rounded))
             .contentTransition(.numericText(countsDown: countsDown))
             .monospacedDigit()
             .foregroundStyle(
@@ -338,19 +316,19 @@ private struct HeroBigNumber: View {
 #Preview("Hero — Form sections") {
     Form {
         Section {
-            HeroCard(mode: .empty)
+            HeroCard(count: 0, isScanning: false)
         } footer: {
             Text("扫描完成")
         }
-        
+
         Section {
-            HeroCard(mode: .scanning(matched: 17))
+            HeroCard(count: 17, isScanning: true)
         } footer: {
             Text("正在扫描 128 / 4000")
         }
-        
+
         Section {
-            HeroCard(mode: .pending(count: 42))
+            HeroCard(count: 42, isScanning: false)
         } footer: {
             Text("扫描完成")
         }
