@@ -22,8 +22,6 @@ struct HomeView: View {
     @State private var showDeleteErrorAlert = false
     @State private var showResetConfirm = false
 
-    @Namespace private var glassNamespace
-
     var body: some View {
         NavigationStack {
             Group {
@@ -68,24 +66,31 @@ struct HomeView: View {
     // MARK: - Main content
 
     private var mainContent: some View {
-        ScrollView {
-            VStack {
-                GlassEffectContainer {
-                    HeroCard(mode: heroMode)
-                        .glassEffectID("hero", in: glassNamespace)
-                }
-                .padding(.horizontal)
-
-                homeHeroStatusCaption
-                    .padding(.horizontal)
-                    .padding(.horizontal)
-                    .padding(.top, 8)
-
-                modeCard
-                    .padding(.horizontal)
-                    .padding(.top, 24)
+        Form {
+            Section {
+                HeroCard(mode: heroMode)
+            } footer: {
+                heroSectionFooter
             }
-            .frame(maxWidth: .infinity)
+
+            Section {
+                Picker(
+                    "修复模式",
+                    selection: Binding(
+                        get: { fixer.mode },
+                        set: { fixer.mode = $0 }
+                    )
+                ) {
+                    ForEach(FixMode.allCases) { mode in
+                        Text(mode.title).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .disabled(fixer.status != .idle)
+            } footer: {
+                Text(fixer.mode.explanation)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
         .safeAreaInset(edge: .bottom) { fixButton }
     }
@@ -102,12 +107,11 @@ struct HomeView: View {
         return .empty
     }
 
-    // MARK: - Hero-adjacent status
+    // MARK: - Hero section footer (status)
 
-    /// Shown directly under the glass hero card (not in the navigation bar) so
-    /// status stays visually tied to the main metric and long messages are
-    /// not squeezed into the large-title chrome.
-    private var homeHeroStatusCaption: some View {
+    /// Form section footers keep status grouped with the hero metric without
+    /// competing with the navigation title.
+    private var heroSectionFooter: some View {
         let payload = homeHeroStatusPayload
         return Group {
             if !payload.text.isEmpty {
@@ -115,9 +119,8 @@ struct HomeView: View {
                     if payload.showsProgress {
                         ProgressView()
                             .controlSize(.small)
-                    } 
+                    }
                     Text(payload.text)
-                        .font(.subheadline)
                         .foregroundStyle(payload.isFailure ? .red : .secondary)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -125,6 +128,7 @@ struct HomeView: View {
                 .accessibilityElement(children: .combine)
             }
         }
+        .animation(.snappy, value: payload.text)
     }
 
     private var homeHeroStatusPayload: (text: String, showsProgress: Bool, isFailure: Bool) {
@@ -150,32 +154,6 @@ struct HomeView: View {
         case .none:
             return ("", false, false)
         }
-    }
-
-    // MARK: - Mode card
-
-    private var modeCard: some View {
-        @Bindable var fixer = fixer
-        return VStack(alignment: .leading, spacing: 10) {
-            Text("修复模式")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-
-            Picker("修复模式", selection: $fixer.mode) {
-                ForEach(FixMode.allCases) { mode in
-                    Text(mode.title).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .disabled(fixer.status != .idle)
-
-            Text(fixer.mode.explanation)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: - Bottom button
@@ -315,10 +293,6 @@ struct HeroCard: View {
                 CountHero(count: count, isScanning: false)
             }
         }
-        .glassEffect(
-            .regular,
-            in: .rect(cornerRadius: 32, style: .continuous)
-        )
     }
 }
 
@@ -342,9 +316,8 @@ private struct CountHero: View {
 
                 HeroBigNumber(value: count, countsDown: !isScanning)
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding()
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -363,9 +336,7 @@ private struct EmptyHero: View {
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 32)
-        .padding(.horizontal)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -404,31 +375,24 @@ private struct HeroBigNumber: View {
         .modelContainer(for: [Candidate.self, ScanState.self], inMemory: true)
 }
 
-#Preview("Hero") {
-    @Previewable @Namespace var emptyNamespace
-    @Previewable @Namespace var scanningNamespace
-    @Previewable @Namespace var pendingNamespace
-
-    ScrollView {
-        VStack(spacing: 24) {
-            GlassEffectContainer(spacing: 20) {
-                HeroCard(mode: .empty)
-                    .glassEffectID("hero", in: emptyNamespace)
-            }
-            .padding(.horizontal)
-
-            GlassEffectContainer(spacing: 20) {
-                HeroCard(mode: .scanning(matched: 17))
-                    .glassEffectID("hero", in: scanningNamespace)
-            }
-            .padding(.horizontal)
-
-            GlassEffectContainer(spacing: 20) {
-                HeroCard(mode: .pending(count: 42))
-                    .glassEffectID("hero", in: pendingNamespace)
-            }
-            .padding(.horizontal)
+#Preview("Hero — Form sections") {
+    Form {
+        Section {
+            HeroCard(mode: .empty)
+        } footer: {
+            Text("扫描完成")
         }
-        .padding(.vertical)
+        
+        Section {
+            HeroCard(mode: .scanning(matched: 17))
+        } footer: {
+            Text("正在扫描 128 / 4000")
+        }
+        
+        Section {
+            HeroCard(mode: .pending(count: 42))
+        } footer: {
+            Text("扫描完成")
+        }
     }
 }
