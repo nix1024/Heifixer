@@ -114,7 +114,7 @@ struct HomeView: View {
                     Text("清理原图")
                 } footer: {
                     Text(
-                        "仅删除照片库中仍存在的原始照片；已生成的修复版照片 不会删除。系统会弹出一次删除确认。若原图已在「照片」中手动删除，将只更新记录、不会再次请求删除。"
+                        "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
                     )
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
