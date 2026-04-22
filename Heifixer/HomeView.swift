@@ -349,7 +349,7 @@ private struct EmptyHero: View {
             Text("一切就绪")
                 .font(.system(.title, design: .rounded, weight: .semibold))
                 .padding(.top)
-            Text("没有需要修复的照片。新照片加入照片库时，Heifixer 会自动检测。")
+            Text("没有需要修复的照片。新照片加入照片库时，Heifixer 会自动扫描。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.leading)
