@@ -31,11 +31,11 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             Group {
-//                if fixer.hasLibraryAccess {
+                if fixer.hasLibraryAccess {
                     mainContent
-//                } else {
-//                    AuthorizationPromptView()
-//                }
+                } else {
+                    AuthorizationPromptView()
+                }
             }
             .navigationTitle("Heifixer")
             .navigationSubtitle("")
@@ -88,7 +88,7 @@ struct HomeView: View {
                     )
                 )
                 .disabled(fixer.status != .idle)
-                
+
                 if !fixedCandidates.isEmpty {
                     Button(role: .destructive) {
                         Task { await fixer.deleteFixedOriginals(modelContext: modelContext) }
@@ -98,10 +98,16 @@ struct HomeView: View {
                     .disabled(fixer.status != .idle || scanner.status.isScanning)
                 }
             } footer: {
-                Text(
-                    "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
-                )
-                .frame(maxWidth: .infinity, alignment: .leading)
+                VStack(alignment: .leading, spacing: 10) {
+                    Text(fixer.mode.explanation)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    if !fixedCandidates.isEmpty {
+                        Text(
+                            "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
+                        )
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
         }
         .safeAreaInset(edge: .bottom) { fixButton }
