@@ -31,11 +31,11 @@ struct HomeView: View {
     var body: some View {
         NavigationStack {
             Group {
-                if fixer.hasLibraryAccess {
+//                if fixer.hasLibraryAccess {
                     mainContent
-                } else {
-                    AuthorizationPromptView()
-                }
+//                } else {
+//                    AuthorizationPromptView()
+//                }
             }
             .navigationTitle("Heifixer")
             .navigationSubtitle("")
@@ -80,44 +80,28 @@ struct HomeView: View {
             }
 
             Section {
-                Picker(
-                    "修复模式",
-                    selection: Binding(
-                        get: { fixer.mode },
-                        set: { fixer.mode = $0 }
+                Toggle(
+                    "自动删除原图",
+                    isOn: Binding(
+                        get: { fixer.mode == .replaceOriginal },
+                        set: { fixer.mode = $0 ? .replaceOriginal : .keepOriginal }
                     )
-                ) {
-                    ForEach(FixMode.allCases) { mode in
-                        Text(mode.title).tag(mode)
-                    }
-                }
-                .pickerStyle(.segmented)
-                .labelsHidden()
-                .accessibilityLabel("修复模式")
+                )
                 .disabled(fixer.status != .idle)
-            } header: {
-                Text("修复模式")
-            } footer: {
-                Text(fixer.mode.explanation)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-
-            if !fixedCandidates.isEmpty {
-                Section {
+                
+                if !fixedCandidates.isEmpty {
                     Button(role: .destructive) {
                         Task { await fixer.deleteFixedOriginals(modelContext: modelContext) }
                     } label: {
                         Text("删除 \(fixedCandidates.count) 张原图")
                     }
                     .disabled(fixer.status != .idle || scanner.status.isScanning)
-                } header: {
-                    Text("清理原图")
-                } footer: {
-                    Text(
-                        "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
-                    )
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+            } footer: {
+                Text(
+                    "仅删除照片库中仍存在的原始照片，已生成的修复版照片不会删除。"
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .safeAreaInset(edge: .bottom) { fixButton }
