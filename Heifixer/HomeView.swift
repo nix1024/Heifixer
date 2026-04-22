@@ -86,7 +86,11 @@ struct HomeView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .labelsHidden()
+                .accessibilityLabel("修复模式")
                 .disabled(fixer.status != .idle)
+            } header: {
+                Text("修复模式")
             } footer: {
                 Text(fixer.mode.explanation)
                     .frame(maxWidth: .infinity, alignment: .leading)
