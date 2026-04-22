@@ -33,6 +33,9 @@ struct ContentView: View {
                 }
             }
             .navigationTitle("Heifixer")
+#if os(iOS) || os(visionOS)
+            .navigationBarTitleDisplayMode(.inline)
+#endif
             .toolbar { toolbarContent }
             .onChange(of: fixer.lastError) { _, newValue in
                 showDeleteErrorAlert = newValue != nil
@@ -192,30 +195,32 @@ struct ContentView: View {
     // MARK: - Bottom button
 
     private var fixButton: some View {
-        VStack(spacing: 0) {
-            Divider()
-            Button {
-                Task { await fixer.processPending(modelContext: modelContext) }
-            } label: {
-                HStack {
-                    if fixer.isProcessing {
-                        ProgressView()
-                            .controlSize(.small)
-                            .tint(.white)
-                        Text("正在修复 \(fixer.processedCount) / \(fixer.totalCount)…")
-                    } else {
-                        Image(systemName: "wand.and.stars")
-                        Text(startButtonTitle)
-                    }
+        // Liquid Glass CTA. The `.glassProminent` style renders its own
+        // material surface; avoid wrapping in `.background(.bar)` or adding
+        // a Divider — both would fight the automatic scroll-edge effect
+        // that iOS 26 draws under the inset.
+        Button {
+            Task { await fixer.processPending(modelContext: modelContext) }
+        } label: {
+            HStack(spacing: 8) {
+                if fixer.isProcessing {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("正在修复 \(fixer.processedCount) / \(fixer.totalCount)…")
+                } else {
+                    Image(systemName: "wand.and.stars")
+                    Text(startButtonTitle)
                 }
-                .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
-            .disabled(fixer.isProcessing || pendingCandidates.isEmpty)
-            .padding()
+            .font(.headline)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity)
         }
-        .background(.bar)
+        .buttonStyle(.glassProminent)
+        .controlSize(.large)
+        .disabled(fixer.isProcessing || pendingCandidates.isEmpty)
+        .padding(.horizontal)
+        .padding(.bottom, 8)
     }
 
     private var startButtonTitle: String {
