@@ -142,6 +142,67 @@ final class PhotoFixer {
         }
     }
 
+    /// After a `.keepOriginal` run, originals remain in the library. This
+    /// batches deletion of those originals for every `.fixed` candidate,
+    /// mirroring the tail of `.replaceOriginal`. Rows whose original asset
+    /// is already gone are marked `.originalDeleted` without prompting.
+    func deleteFixedOriginals(modelContext: ModelContext) async {
+        guard case .idle = status else { return }
+        guard hasLibraryAccess else {
+            lastError = "照片库访问未授权。"
+            return
+        }
+        lastError = nil
+
+        let fixedRaw = Candidate.State.fixed.rawValue
+        let descriptor = FetchDescriptor<Candidate>(
+            predicate: #Predicate<Candidate> { $0.stateRaw == fixedRaw },
+            sortBy: [SortDescriptor(\Candidate.fixedAt, order: .reverse)]
+        )
+
+        let fixedRows: [Candidate]
+        do {
+            fixedRows = try modelContext.fetch(descriptor)
+        } catch {
+            lastError = "读取已修复记录失败：\(error.localizedDescription)"
+            return
+        }
+
+        guard !fixedRows.isEmpty else { return }
+
+        var targets: [(candidateID: PersistentIdentifier, originalAsset: PHAsset)] = []
+        var missingOriginalIDs: [PersistentIdentifier] = []
+
+        for candidate in fixedRows {
+            let fetch = PHAsset.fetchAssets(
+                withLocalIdentifiers: [candidate.originalAssetID],
+                options: nil
+            )
+            if let asset = fetch.firstObject {
+                targets.append((candidate.persistentModelID, asset))
+            } else {
+                missingOriginalIDs.append(candidate.persistentModelID)
+            }
+        }
+
+        let now = Date()
+        for id in missingOriginalIDs {
+            if let candidate = modelContext.model(for: id) as? Candidate {
+                candidate.state = .originalDeleted
+                candidate.originalDeletedAt = now
+            }
+        }
+        try? modelContext.save()
+
+        guard !targets.isEmpty else { return }
+
+        status = .cleaningUp
+        defer { status = .idle }
+
+        await performBatchOriginalDeletion(targets: targets, modelContext: modelContext)
+        try? modelContext.save()
+    }
+
     // MARK: - Single-candidate flow
 
     private func process(
@@ -257,6 +318,14 @@ final class PhotoFixer {
     private func flushPendingDeletions(modelContext: ModelContext) async {
         let targets = pendingReplacements
         pendingReplacements.removeAll()
+        await performBatchOriginalDeletion(targets: targets, modelContext: modelContext)
+    }
+
+    private func performBatchOriginalDeletion(
+        targets: [(candidateID: PersistentIdentifier, originalAsset: PHAsset)],
+        modelContext: ModelContext
+    ) async {
+        guard !targets.isEmpty else { return }
         let assets = targets.map(\.originalAsset)
 
         do {

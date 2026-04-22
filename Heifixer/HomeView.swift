@@ -19,6 +19,12 @@ struct HomeView: View {
     )
     private var pendingCandidates: [Candidate]
 
+    @Query(
+        filter: #Predicate<Candidate> { $0.stateRaw == "fixed" },
+        sort: [SortDescriptor(\Candidate.fixedAt, order: .reverse)]
+    )
+    private var fixedCandidates: [Candidate]
+
     @State private var showDeleteErrorAlert = false
     @State private var showResetConfirm = false
 
@@ -94,6 +100,24 @@ struct HomeView: View {
             } footer: {
                 Text(fixer.mode.explanation)
                     .frame(maxWidth: .infinity, alignment: .leading)
+            }
+
+            if !fixedCandidates.isEmpty {
+                Section {
+                    Button(role: .destructive) {
+                        Task { await fixer.deleteFixedOriginals(modelContext: modelContext) }
+                    } label: {
+                        Text("删除 \(fixedCandidates.count) 张原图")
+                    }
+                    .disabled(fixer.status != .idle || scanner.status.isScanning)
+                } header: {
+                    Text("清理原图")
+                } footer: {
+                    Text(
+                        "仅删除照片库中仍存在的原始照片；已生成的修复版照片 不会删除。系统会弹出一次删除确认。若原图已在「照片」中手动删除，将只更新记录、不会再次请求删除。"
+                    )
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
             }
         }
         .safeAreaInset(edge: .bottom) { fixButton }
